@@ -1,24 +1,98 @@
----
-title: Create a project
-description: Learn how to create a new Expo project.
-hideTOC: true
----
+Binance WebSocket → Data Handler → Pattern Engine
+                                  ↓
+                           Market Structure Engine (H4)
+                                  ↓
+                           Confirmation Engine (H1)
+                                  ↓
+                              Signal Engine
+                                  ↓
+                          API / Dashboard Output
+pip install python-binance pandas numpy fastapi uvicorn
+from binance import AsyncClient, BinanceSocketManager
+import asyncio
+import pandas as pd
 
-import { Terminal } from '~/ui/components/Snippet';
+symbol = "BTCUSDT"
+h4_data = pd.DataFrame()
+h1_data = pd.DataFrame()
 
-System requirements:
+async def main():
+    client = await AsyncClient.create()
+    bm = BinanceSocketManager(client)
 
-- [Node.js (LTS)](https://nodejs.org/en/).
-- macOS, Windows (Powershell and [WSL 2](https://expo.fyi/wsl)), and Linux are supported.
+    # 1h kline socket
+    h1_socket = bm.kline_socket(symbol=symbol, interval="1h")
+    # 4h kline socket
+    h4_socket = bm.kline_socket(symbol=symbol, interval="4h")
 
-We recommend starting with the default project created by `create-expo-app`. The default project includes example code to help you get started.
+    async with h1_socket as h1_stream, h4_socket as h4_stream:
+        while True:
+            res1 = await h1_stream.recv()
+            res4 = await h4_stream.recv()
 
-To create a new project, run the following command:
+            handle_kline(res1, "H1")
+            handle_kline(res4, "H4")
 
-<Terminal cmd={['$ npx create-expo-app@latest --template default@sdk-55']} />
+def handle_kline(msg, timeframe):
+    k = msg['k']
+    if k['x']:  # candle closed
+        candle = {
+            "open": float(k['o']),
+            "high": float(k['h']),
+            "low": float(k['l']),
+            "close": float(k['c'])
+        }
+        print(f"{timeframe} closed candle:", candle)
 
-> **Note:** During the SDK 55 transition period, `create-expo-app@latest` without the `--template` flag creates an SDK 54 project. If you plan to use Expo Go on a physical device, use an SDK 54 project. Otherwise, use `--template default@sdk-55` to create an SDK 55 project. You can also choose a different template by adding the [`--template` option](/more/create-expo/#--template).
+asyncio.run(main())
+def detect_market_structure(df):
+    highs = df['high']
+    lows = df['low']
 
-## Next step
+    if highs.iloc[-1] > highs.iloc[-2] and lows.iloc[-1] > lows.iloc[-2]:
+        return "Bullish"
+    elif highs.iloc[-1] < highs.iloc[-2] and lows.iloc[-1] < lows.iloc[-2]:
+        return "Bearish"
+    else:
+        return "Neutral"
+def find_swings(df):
+    swings = []
+    for i in range(2, len(df)-2):
+        if df['low'][i] < df['low'][i-1] and df['low'][i] < df['low'][i+1]:
+            swings.append(("low", i))
+        if df['high'][i] > df['high'][i-1] and df['high'][i] > df['high'][i+1]:
+            swings.append(("high", i))
+    return swings
+def detect_double_bottom(df):
+    swings = find_swings(df)
+    lows = [i for t, i in swings if t == "low"]
 
-You have a project. Now it's time to set up your development environment so that you can start developing.
+    if len(lows) >= 2:
+        last_two = lows[-2:]
+        price1 = df['low'][last_two[0]]
+        price2 = df['low'][last_two[1]]
+
+        if abs(price1 - price2) / price1 < 0.01:  # 1% tolerance
+            return True
+    return False
+def breakout_retest(df):
+    resistance = df['high'][-20:].max()
+    support = df['low'][-20:].min()
+    close = df['close'].iloc[-1]
+
+    if close > resistance:
+        return "Bullish Breakout"
+
+    if close < support:
+        return "Bearish Breakout"
+
+    return None
+from fastapi import FastAPI
+
+app = FastAPI()
+
+latest_signal = None
+
+@app.get("/signal")
+def get_signal():
+    return {"signal": latest_signal}
